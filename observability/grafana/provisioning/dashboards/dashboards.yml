@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: agent
+    folder: Agent
+    type: file
+    options: { path: /var/lib/grafana/dashboards }
+  - name: student
+    folder: Student
+    type: file
+    options: { path: /var/lib/grafana/dashboards-student }

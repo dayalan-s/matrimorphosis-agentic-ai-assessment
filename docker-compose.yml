@@ -1,0 +1,98 @@
+services:
+  api:
+    build: { context: ., target: app }
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      MCP_URL: http://notes-mcp:9000/mcp   # your notes and tasks MCP server (src/app/mcp_server/server.py)
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}   # override from the shell: GROQ_MODEL=openai/gpt-oss-20b docker compose up -d
+      ASSESSMENT_DEBUG: "1"          # exposes /debug/telemetry and /debug/assessment
+      CHECKPOINT_DB: /data/checkpoints.sqlite   # chat memory (task 2: make it a SQLite checkpointer)
+      KB_DB: /data/kb.sqlite       # document registry + session profiles
+      UPLOAD_DIR: /data            # uploaded files: /data/uploads/<session>/
+      OTEL_SERVICE_NAME: extraction-agent
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317   # gRPC: host:port, no scheme
+      AGENT_MAX_STEPS: "25"
+    depends_on:
+      migrate: { condition: service_completed_successfully }   # the users database must be migrated first
+      qdrant: { condition: service_started }
+      notes-mcp:   # task 7: notes and tasks per user. Same image, same /data volume (it reads users.sqlite to check tokens)
+    build: { context: ., target: app }
+    command: ["python", "src/app/mcp_server/server.py", "--http"]
+    environment:
+      KB_DB: /data/kb.sqlite
+      MCP_DB: /data/mcp.sqlite
+    ports:
+      - "9000:9000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    volumes:
+      - app_data:/data
+    restart: unless-stopped
+
+  # ---- observability: app -> collector -> Tempo / Prometheus / Loki -> Grafana ----
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.152.0   # contrib: spanmetrics + otlphttp
+    command: ["--config=/etc/otel/config.yml"]
+    volumes:
+      - ./observability/otel-collector-config.yml:/etc/otel/config.yml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC (apps)
+      - "4318:4318"   # OTLP HTTP
+    depends_on: [tempo, loki]
+
+  tempo:
+    image: grafana/tempo:2.8.2
+    command: ["-config.file=/etc/tempo/config.yml"]
+    volumes:
+      - ./observability/tempo-config.yml:/etc/tempo/config.yml:ro
+      - tempo_data:/var/tempo   # /var/tempo, not /tmp (named-volume permission errors)
+
+  loki:
+    image: grafana/loki:3.0.0
+    command: ["-config.file=/etc/loki/config.yml"]
+    volumes:
+      - ./observability/loki-config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on: [otel-collector]
+
+  grafana:
+    image: grafana/grafana-oss:12.1.0
+    environment:   # demo only: anonymous admin. Use real auth in production.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/agent-overview.json
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./src/app/dashboards:/var/lib/grafana/dashboards-student:ro   # your own dashboards (JSON files)
+      - grafana_data:/var/lib/grafana/data
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus, loki, tempo]
+
+networks:
+  default:
+    ipam:   # explicit subnet: with a VPN's 0.0.0.0/1 route Docker's auto-allocation reports "pools fully subnetted"
+      config:
+        - subnet: 172.30.50.0/24
+
+volumes:
+  app_data:
+  qdrant_data:
+  tempo_data:
+  loki_data:
+  prometheus_data:
+  grafana_data:

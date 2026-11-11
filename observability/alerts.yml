@@ -1,0 +1,15 @@
+groups:
+  - name: agent
+    rules:
+      - alert: LLMErrorRateHigh
+        expr: sum(rate(agent_llm_requests_total{status="error"}[5m])) / sum(rate(agent_llm_requests_total[5m])) > 0.1
+        for: 2m
+        annotations: { summary: "More than 10% of LLM calls are failing (rate limit? bad key?)" }
+      - alert: TokenBurnHigh
+        expr: sum(rate(agent_llm_tokens_total[5m])) * 60 > 50000
+        for: 5m
+        annotations: { summary: "Over 50k tokens/min - a runaway agent loop or abuse" }
+      - alert: AgentLatencyP95High
+        expr: histogram_quantile(0.95, sum(rate(agent_http_request_duration_seconds_bucket{http_route="/agent"}[5m])) by (le)) > 20
+        for: 5m
+        annotations: { summary: "/agent p95 above 20s" }

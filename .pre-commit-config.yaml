@@ -1,0 +1,26 @@
+# One-time setup: uv run --only-group hooks pre-commit install
+default_install_hook_types: [pre-commit, pre-push]
+repos:
+  - repo: local
+    hooks:
+      - id: protected-files
+        name: only the files in docs/TASK.md may change
+        entry: bash scripts/check_protected.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: protected-files-push
+        name: only the files in docs/TASK.md changed in this push
+        entry: bash scripts/check_protected.sh HEAD
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      - id: local-eval
+        name: run the tests locally (Docker)
+        entry: bash scripts/local_eval.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

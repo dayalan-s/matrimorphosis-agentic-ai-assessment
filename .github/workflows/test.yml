@@ -1,0 +1,136 @@
+name: evaluate
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify only src/app/ changed
+        run: bash scripts/check_protected.sh HEAD
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build app image (runner target)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runner
+          tags: eval-app:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          tags: eval-test:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Static async check (task 2)
+        run: |
+          mkdir -p results
+          python3 scripts/check_async.py
+          python3 scripts/check_integrity.py
+
+      - name: Alembic migration round trip (task 4)
+        run: |
+          mkdir -p results
+          docker volume create eval-data
+          docker run --rm -v eval-data:/data eval-app:ci python scripts/check_migration.py | tee results/migration.json || echo '{}' > results/migration.json
+
+      - name: Start the MCP server (notes and tasks, task 9) and the app
+        run: |
+          docker run -d --name eval-mcp --network host -v eval-data:/data eval-app:ci python src/app/mcp_server/server.py --http
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/9000) 2>/dev/null && break; sleep 1; done
+          docker run -d --name eval-app --network host --memory 1g --cpus 1 -v eval-data:/data eval-app:ci
+
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8000/health && echo && exit 0
+            sleep 2
+          done
+          echo "::error::App did not become healthy within 120s"
+          docker logs eval-app
+          exit 1
+
+      - name: Tests, phase 1 (before restart)
+        id: phase1
+        continue-on-error: true
+        run: |
+          docker run --rm --network host \
+            -e BASE_URL=http://localhost:8000 \
+            -e MCP_URL=http://localhost:9000/mcp \
+            -e ASSESSMENT_ID=agentic-ai-extension \
+            -e GITHUB_SHA=${{ github.sha }} \
+            -v ${{ github.workspace }}/results:/app/results \
+            eval-test:ci \
+            pytest tests/ -m phase1 --tb=short -q --junit-xml=results/phase1.xml
+
+      - name: Restart the app container (same data volume)
+        if: always()
+        run: |
+          docker restart eval-mcp
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/9000) 2>/dev/null && break; sleep 1; done
+          docker restart eval-app
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8000/health >/dev/null && echo "App back after restart" && exit 0
+            sleep 2
+          done
+          echo "::error::App did not become healthy after the restart"
+          docker logs eval-app
+          exit 1
+
+      - name: Tests, phase 2 (after restart)
+        id: phase2
+        if: always()
+        continue-on-error: true
+        run: |
+          docker run --rm --network host \
+            -e BASE_URL=http://localhost:8000 \
+            -e MCP_URL=http://localhost:9000/mcp \
+            -e ASSESSMENT_ID=agentic-ai-extension \
+            -e GITHUB_SHA=${{ github.sha }} \
+            -v ${{ github.workspace }}/results:/app/results \
+            eval-test:ci \
+            pytest tests/ -m phase2 --tb=short -q --junit-xml=results/phase2.xml
+
+      - name: Show the score
+        if: always()
+        run: python3 scripts/render_summary.py || true
+
+      - name: App log (last lines)
+        if: always()
+        run: docker logs --tail 60 eval-app || true; docker logs --tail 30 eval-mcp || true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            results/summary.json
+            results/phase1.xml
+            results/phase2.xml
+
+      - name: Fail the run if any test failed
+        if: steps.phase1.outcome == 'failure' || steps.phase2.outcome == 'failure'
+        run: |
+          echo "::error title=Not every check passed::Open the Summary tab of this run: it shows your score and what to fix. The score is recorded when you submit this run."
+          exit 1
+
+      - name: Stop app container
+        if: always()
+        run: docker rm -f eval-app eval-mcp || true
