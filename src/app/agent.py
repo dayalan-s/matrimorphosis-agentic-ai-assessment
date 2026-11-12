@@ -62,16 +62,26 @@ class ShrinkOldToolResults(AgentMiddleware):
 
 
 async def mcp_tools():
-    """MCP tools become ordinary LangChain tools. The notes and tasks server (src/app/mcp_server/server.py) is reached over HTTP at
-    MCP_URL (docker compose and CI start it). Retries a few times: the server may still be starting.
-
-    TODO(task 9): make every MCP call run AS THE LOGGED-IN USER. The server reads `Authorization: Bearer <token>`. Write a tool
-    interceptor (langchain-mcp-adapters: `async def interceptor(request, handler)`; `request.runtime.context` is this request's Ctx,
-    `request.override(headers={...})` returns a request with extra HTTP headers) and pass it as tool_interceptors=[...] below.
-    The token comes from Ctx (task 9: add `token` to Ctx, /agent fills it from the Authorization header). The model never sees it.
-    """
+    """Connect MCP tools and forward the logged-in user's token."""
     url = os.getenv("MCP_URL", "http://localhost:9000/mcp")
-    client = MultiServerMCPClient({"tasks": {"url": url, "transport": "streamable_http"}})  # TODO(task 9): tool_interceptors=[...]
+
+    async def interceptor(request, handler):
+        token = request.runtime.context.token
+
+        if not token:
+            raise RuntimeError("Missing authentication token for MCP call.")
+
+        return await handler(
+            request.override(
+                headers={"Authorization": f"Bearer {token}"}
+            )
+        )
+
+    client = MultiServerMCPClient(
+        {"tasks": {"url": url, "transport": "streamable_http"}},
+        tool_interceptors=[interceptor],
+    )
+
     for attempt in range(15):
         try:
             return await client.get_tools()
@@ -79,7 +89,6 @@ async def mcp_tools():
             if attempt == 14:
                 raise
             await asyncio.sleep(2)
-
 
 
 async def build_agent(kb: KnowledgeBase, model=agent_llm, checkpointer=None):
