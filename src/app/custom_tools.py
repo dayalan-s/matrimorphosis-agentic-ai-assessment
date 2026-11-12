@@ -123,7 +123,7 @@ def build_custom_tools(kb: KnowledgeBase) -> list:
                 f'{stats["documents"]} documents, '
                 f'{stats["sections"]} sections, '
                 f'{stats["chunks"]} chunks. '
-                f"Top keywords: {keyword_text}"
+                f"Top keywords: {keyword_text}."
             )
 
         except Exception as exc:
