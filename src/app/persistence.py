@@ -1,24 +1,27 @@
-"""Chat memory: the LangGraph checkpointer that remembers each conversation (thread_id).
 
-TODO(task 3): chat memory must survive a restart of the API container.
-  Today it is `InMemorySaver`: restart the container and every conversation is forgotten.
-  Replace it with a SQLite-backed saver that stores to the file named by CHECKPOINT_DB.
+"""Chat memory: the LangGraph SQLite checkpointer.
 
-Hints
-  - the package `langgraph-checkpoint-sqlite` is already installed
-  - the agent runs async, so you want the async saver; `AsyncSqliteSaver.from_conn_string(path)` is an async CONTEXT MANAGER
-  - open it once at startup and keep it open until shutdown (the lifespan in main.py holds it open)
-  - make sure the folder of CHECKPOINT_DB exists
-  - then integrate it: main.py's lifespan (TODO task 3) opens it and agent.py's build_agent receives it
+The SQLite-backed checkpointer preserves conversations across API container restarts.
 """
+
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
 
 CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", "checkpoints.sqlite")
 
 
 @asynccontextmanager
 async def open_checkpointer():
-    yield InMemorySaver()  # TODO(task 3): replace with an AsyncSqliteSaver on CHECKPOINT_DB
+    """Open the SQLite checkpointer and keep it open until application shutdown."""
+
+    db_path = Path(CHECKPOINT_DB)
+
+    # Create the parent directory if it does not exist.
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
+        yield checkpointer
